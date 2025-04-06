@@ -1,0 +1,115 @@
+const express = require('express');
+const connectDB = require('./config/db');
+const path = require('path');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const { errorHandler } = require('./middleware/errorMiddleware');
+const { initializeIntegrations } = require('../integration/hrm-dashboard-integration');
+const cron = require('node-cron');
+const notificationService = require('./services/notificationService');
+require('dotenv').config();
+
+// Connect to MongoDB
+connectDB();
+
+const app = express();
+
+// Security middlewares
+app.use(helmet());
+app.use(cors());
+
+// Body parser
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: false, limit: '50mb' }));
+
+// Logging middleware
+if (process.env.NODE_ENV === 'development') {
+  app.use(morgan('dev'));
+}
+
+// Define routes
+app.use('/api/courses', require('./routes/courseRoutes'));
+app.use('/api/enrollments', require('./routes/enrollmentRoutes'));
+app.use('/api/content', require('./routes/contentRoutes'));
+app.use('/api/learning-paths', require('./routes/learningPathRoutes'));
+app.use('/api/gamification', require('./routes/gamificationRoutes'));
+app.use('/api/webinars', require('./routes/webinarRoutes'));
+app.use('/api/analytics', require('./routes/analyticsRoutes'));
+
+// Integration routes
+app.use('/api/hrm-integration', require('../integration/hrm-dashboard-integration').router);
+
+// Serve static files for uploads
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
+// Custom error handler
+app.use(errorHandler);
+
+// Serve frontend in production
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '../frontend/build')));
+  
+  app.get('*', (req, res) => {
+    res.sendFile(path.resolve(__dirname, '../frontend/build', 'index.html'));
+  });
+}
+
+// Initialize integrations with other modules
+if (process.env.ENABLE_INTEGRATIONS === 'true') {
+  initializeIntegrations();
+}
+
+// Set up scheduled tasks
+// Send due date reminders daily at 9 AM
+cron.schedule('0 9 * * *', async () => {
+  console.log('Running scheduled task: Sending due date reminders');
+  try {
+    await notificationService.sendDueDateReminders();
+  } catch (error) {
+    console.error('Error running scheduled reminder task:', error);
+  }
+});
+
+// Update webinar statuses every hour
+cron.schedule('0 * * * *', async () => {
+  console.log('Running scheduled task: Updating webinar statuses');
+  try {
+    const Webinar = require('./models/Webinar');
+    await Webinar.updateMany({}, {}); // Triggers the pre-save hook to update statuses
+  } catch (error) {
+    console.error('Error updating webinar statuses:', error);
+  }
+});
+
+const PORT = process.env.PORT || 5000;
+
+// Start server
+const server = app.listen(PORT, () => {
+  console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
+  
+  // Display integration status
+  if (process.env.ENABLE_INTEGRATIONS === 'true') {
+    console.log('🔄 HRM Module integrations enabled');
+  }
+  
+  // Display other enabled features
+  if (process.env.ZOOM_INTEGRATION_ENABLED === 'true') {
+    console.log('🎥 Zoom integration enabled for webinars');
+  }
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (err) => {
+  console.error(`Error: ${err.message}`);
+  // Close server & exit process
+  server.close(() => process.exit(1));
+});
+
+// Handle SIGTERM
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received. Shutting down gracefully');
+  server.close(() => {
+    console.log('Process terminated');
+  });
+});
